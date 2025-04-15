@@ -1,0 +1,13 @@
+python-docx>=0.8.11
+pymupdf>=1.23.7
+pandas>=2.1.4
+camelot-py>=0.11.0
+tiktoken>=0.6.0
+chromadb>=0.4.24
+sentence-transformers>=2.5.1
+llama-cpp-python>=0.2.72
+rouge-score>=0.1.2
+pydantic>=2.7.1
+streamlit
+einops
+openpyxl
