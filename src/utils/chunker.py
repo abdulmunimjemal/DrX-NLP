@@ -1,5 +1,5 @@
 from typing import List, Tuple
-from src.core.core import DocumentChunk
+from src.core.core import DocumentChunk, logger
 import tiktoken
 
 class Chunker:
@@ -28,10 +28,13 @@ class Chunker:
         chunks = []
         chunk_counter = 0
         
-        for page_num, text in pages:
-            if not text:
+        for page in pages:
+            text = page.get('text', '')
+            page_num = page.get('page_number', 0)
+            if not page['text']:
+                logger.info(f"Skipping empty page {page_num} in {filename}")
                 continue  # Skip empty text
-            
+                
             # Encode the entire page's text
             tokens = self.encoder.encode(text)
             start = 0
