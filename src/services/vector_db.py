@@ -1,72 +1,66 @@
-from typing import List, Any
-from chromadb import Documents, EmbeddingFunction, ChromaClient
-from sentence_transformers import SentenceTransformer
-from src.core.core import DocumentChunk 
-from src.core.core import count_tokens 
+from src.core.core import DocumentChunk, count_tokens
+from typing import List, Dict, Any, Optional
+import uuid
 
+# Import ChromaDB components and SentenceTransformer for embeddings.
+from chromadb import Documents, EmbeddingFunction, Client  # Updated usage based on ChromaDB docs.
+from sentence_transformers import SentenceTransformer
+import tiktoken  # Tokenizer, as used in your count_tokens function.
+
+
+# --- NomicEmbedder: a wrapper for SentenceTransformer embedding ---
 class NomicEmbedder(EmbeddingFunction):
-    """
-    A wrapper around a SentenceTransformer model to generate embeddings.
-    """
     def __init__(self):
         try:
-            self.model = SentenceTransformer('nomic-ai/nomic-embed-text-v1')
-            # Optionally set the model to evaluation mode if it supports it:
-            self.model.eval()
+            # According to SentenceTransformer documentation, this loads the model.
+            self.model = SentenceTransformer('nomic-ai/nomic-embed-text-v1', trust_remote_code=True)
+            self.model.eval()  # Put the model in evaluation mode.
         except Exception as e:
             raise RuntimeError(f"Failed to initialize SentenceTransformer: {e}")
 
     def __call__(self, texts: Documents) -> List[List[float]]:
-        """
-        Encode a list of texts into embeddings.
-        
-        :param texts: A list of document texts.
-        :return: List of embeddings (each embedding is a list of floats).
-        """
         try:
-            # encode returns a numpy array; converting it to a list of lists.
             embeddings = self.model.encode(texts)
+            # Convert numpy array to a list of lists.
             return embeddings.tolist()
         except Exception as e:
-            raise RuntimeError(f"Error in encoding texts: {e}")
+            raise RuntimeError(f"Error encoding texts: {e}")
 
-
+# --- VectorStore: Manages the document chunks and querying ---
 class VectorStore:
-    """
-    A simple vector store that uses ChromaClient for managing a document collection.
-    """
     def __init__(self):
         try:
-            self.client = ChromaClient()
+            self.client = Client()  # Instantiate the ChromaDB client.
         except Exception as e:
-            raise RuntimeError(f"Failed to initialize ChromaClient: {e}")
-
+            raise RuntimeError(f"Failed to initialize Client: {e}")
+        
         self.embedder = NomicEmbedder()
         try:
+            # Create (or reuse, as appropriate) a collection named "docs"
             self.collection = self.client.create_collection(
                 name="docs",
                 embedding_function=self.embedder
             )
         except Exception as e:
-            raise RuntimeError(f"Failed to create a collection in ChromaClient: {e}")
+            raise RuntimeError(f"Failed to create a collection in Client: {e}")
 
     def add_chunks(self, chunks: List[DocumentChunk]):
-        """
-        Add document chunks to the vector store.
-        
-        :param chunks: A list of DocumentChunk objects.
-        """
         if not chunks:
             print("Warning: No chunks to add.")
             return
         
+        # Prepare document texts, metadata, and unique IDs.
         documents = [chunk.text for chunk in chunks]
         metadatas = [{
             "source": chunk.source,
             "page": chunk.page,
             "chunk_number": chunk.chunk_number
         } for chunk in chunks]
-        ids = [str(i) for i in range(len(documents))]
+        # Generate a unique ID that combines metadata and UUID.
+        ids = [
+            f"{chunk.source}-{chunk.page}-{chunk.chunk_number}-{uuid.uuid4()}"
+            for chunk in chunks
+        ]
         
         try:
             self.collection.add(
@@ -77,82 +71,111 @@ class VectorStore:
         except Exception as e:
             raise RuntimeError(f"Error adding chunks to collection: {e}")
 
-    def query(self, text: str, k: int = 5) -> List[DocumentChunk]:
+    def query(
+        self,
+        text: str,
+        max_chunks: int = 5,
+        per_source: int = 5,
+        metadata_filter: Optional[Dict[str, Any]] = None,
+        rerank: bool = True
+    ) -> List[DocumentChunk]:
         """
         Query the vector store for document chunks similar to the input text.
+
+        This function supports:
+          - Filtering by metadata (e.g., a specific "source").
+          - Grouping results by "source", then selecting up to `per_source` items per source.
+          - Re-ranking: Most similar chunk has no penalty, subsequent chunks get an increasing penalty.
         
         :param text: The query text.
-        :param k: Number of results to retrieve.
-        :return: A list of DocumentChunk objects representing the best matches.
+        :param per_source: Maximum number of responses per document source.
+        :param metadata_filter: Optional dict to filter results by metadata.
+        :param rerank: Whether to apply custom re-ranking logic.
+        :return: List of DocumentChunk objects.
         """
         try:
-            results = self.collection.query(
-                query_texts=[text],
-                n_results=k
-            )
+            # Retrieve many candidates to allow for re-ranking and grouping.
+            n_results = 100
+            if max_chunks > n_results:
+                n_results = max_chunks
+
+            query_params = {
+                "query_texts": [text],
+                "n_results": n_results,
+                "include": ["documents", "metadatas", "distances"]
+            }
+            if metadata_filter:
+                query_params["where"] = metadata_filter
+
+            results = self.collection.query(**query_params)
+            print("\nRaw Query Results:", results, "\n")
         except Exception as e:
             raise RuntimeError(f"Query failed: {e}")
-        
-        # Depending on ChromaClient's schema, results may be a dict with key "documents" or a list.
-        # Here we assume results[0] is an iterable of objects with attributes: document and metadata.
-        if not results or not results[0]:
+
+        if not results or not results.get("documents"):
             return []
 
+        # Process results assuming single query – take first list.
+        docs = results["documents"][0]
+        metas = results["metadatas"][0]
+        # `distances` is assumed to be a list of numbers (lower distance means higher similarity).
+        dists = results.get("distances", [[None] * len(docs)])[0]
+
+        # Build items with computed similarity (using an example conversion).
+        items = []
+        for i, (doc_text, metadata) in enumerate(zip(docs, metas)):
+            distance = dists[i] if dists and dists[i] is not None else None
+            similarity = 1.0 if distance is None else 1 / (1 + distance)
+            item = {
+                "doc_text": doc_text,
+                "metadata": metadata,
+                "distance": distance,
+                "similarity": similarity
+            }
+            items.append(item)
+
+        # Group results by the "source" field in metadata.
+        grouped = {}
+        for item in items:
+            source = item["metadata"].get("source", "unknown")
+            grouped.setdefault(source, []).append(item)
+
+        # Apply re-ranking per source: allow only up to `per_source` items and add a penalty.
+        reranked_items = []
+        penalty = 0.05  # Penalty offset per rank position within the same source.
+        for source, group_items in grouped.items():
+            # Sort items for each source by similarity (higher is better).
+            group_items.sort(key=lambda x: x["similarity"], reverse=True)
+            for rank, item in enumerate(group_items[:per_source]):
+                adjusted_similarity = item["similarity"] - (rank * penalty)
+                item["adjusted_similarity"] = adjusted_similarity
+                reranked_items.append(item)
+
+        # Globally sort all items based on adjusted similarity (if re-ranking is enabled).
+        if rerank:
+            reranked_items.sort(key=lambda x: x["adjusted_similarity"], reverse=True)
+        else:
+            reranked_items.sort(key=lambda x: x["similarity"], reverse=True)
+
+        # Convert items back into DocumentChunk objects.
         chunks = []
-        for res in results[0]:
+        for item in reranked_items:
             try:
                 chunk = DocumentChunk(
-                    source=res.metadata["source"],
-                    page=res.metadata["page"],
-                    chunk_number=res.metadata["chunk_number"],
-                    text=res.document,
-                    tokens=count_tokens(res.document)
+                    source=item["metadata"]["source"],
+                    page=item["metadata"]["page"],
+                    chunk_number=item["metadata"]["chunk_number"],
+                    text=item["doc_text"],
+                    tokens=count_tokens(item["doc_text"])
                 )
                 chunks.append(chunk)
             except KeyError as e:
                 print(f"Missing metadata key in result: {e}")
             except Exception as e:
                 print(f"Error processing a result item: {e}")
-        
-        return chunks
 
-
-# --- Test Harness ---
-
-if __name__ == "__main__":
-    # For testing, we'll simulate a minimal environment.
-    # If you don't have an actual ChromaClient or want to test without side effects,
-    # you can define dummy classes below.
-    try:
-        # Test NomicEmbedder with a dummy text list
-        embedder = NomicEmbedder()
-        sample_texts = ["This is a test.", "Another test sentence."]
-        embeddings = embedder(sample_texts)
-        print("Embeddings:", embeddings)
-    except Exception as e:
-        print("NomicEmbedder test failed:", e)
-
-    # Prepare some dummy DocumentChunk objects for testing add_chunks and query
-    # You might want to replace DocumentChunk with your actual implementation.
-    try:
-        # Let's create two dummy DocumentChunk objects:
-        dummy_chunks = [
-            DocumentChunk(source="dummy.txt", page=1, chunk_number=0, text="Test document chunk one.", tokens=count_tokens("Test document chunk one.")),
-            DocumentChunk(source="dummy.txt", page=1, chunk_number=1, text="Test document chunk two.", tokens=count_tokens("Test document chunk two."))
-        ]
-        
-        # Create a VectorStore instance
-        store = VectorStore()
-        # Add the dummy chunks
-        store.add_chunks(dummy_chunks)
-        print("Chunks added successfully.")
-        
-        # Perform a query using a test string. Depending on your actual collection and client,
-        # this will return results similar to our dummy data.
-        query_results = store.query("Test document", k=2)
-        print("Query Results:")
-        for chunk in query_results:
-            print(f"Source: {chunk.source}, Page: {chunk.page}, Chunk: {chunk.chunk_number}, Tokens: {chunk.tokens}")
-            print("Text:", chunk.text)
-    except Exception as e:
-        print("VectorStore test encountered an error:", e)
+        print(f"Final re-ranked query returned {len(chunks)} chunks.")
+        for chunk in chunks:
+            print(f"Chunk source: {chunk.source}, page: {chunk.page}, "
+                  f"chunk_number: {chunk.chunk_number}, tokens: {chunk.tokens}")
+        return chunks[:max_chunks] if max_chunks > 0 else chunks
