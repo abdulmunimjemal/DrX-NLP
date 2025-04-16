@@ -67,8 +67,8 @@ class RAGSystem:
         try:
             response = self.llm(
                 prompt=prompt,
-                max_tokens=256,
-                temperature=0.2,
+                max_tokens=1024,
+                temperature=0.3,
                 stop=["\n\n"]
             )
         except Exception as e:
