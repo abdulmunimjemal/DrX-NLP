@@ -57,6 +57,7 @@ class RAGSystem:
 
         # Construct the prompt using context, conversation history, and the question.
         prompt = (
+            f"Answer the question based on the provided context and previous conversation.\n\n"
             f"Context:\n{context}\n\n"
             f"Previous conversation:\n{history_context}\n\n"
             f"Question: {question}\n"
@@ -67,9 +68,8 @@ class RAGSystem:
         try:
             response = self.llm(
                 prompt=prompt,
-                max_tokens=1024,
-                temperature=0.3,
-                stop=["\n\n"]
+                max_tokens=512,
+                temperature=0.2,
             )
         except Exception as e:
             raise RuntimeError(f"Error generating response from LLM: {e}")
