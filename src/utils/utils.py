@@ -32,3 +32,18 @@ AVAILABLE_MODELS = {
         "filename": "codellama-13b-instruct.Q4_K_M.gguf"
     },
 }
+
+MIN_TEXT_LENGTH_WORDS = 5 
+
+def preprocess_text(text):
+    """Cleans text for better language detection."""
+    import re
+    text = re.sub(r'https?://\S+|www\.\S+', '', text) # no url
+    text = re.sub(r'\S+@\S+', '', text) # no email
+    text = re.sub(r'<.*?>', '', text) # no HTML tags
+    text = re.sub(r'\d+', '', text) # no numbers
+    text = re.sub(r'[^\w\s.?!]', '', text) # no special characters
+    text = re.sub(r'\s+', ' ', text).strip() # no extra spaces
+    text = re.sub(r'^[^a-zA-Z0-9]+', '', text) # no leading special characters
+    # text = text.lower()
+    return text

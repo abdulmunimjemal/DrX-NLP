@@ -1,339 +1,258 @@
 import os
 import tempfile
+import logging
 from pathlib import Path
+from typing import List
+
 import requests
 import streamlit as st
+from streamlit.runtime.uploaded_file_manager import UploadedFile
 
+# Project-specific imports (with fallback)
 try:
     from src.utils.file_processor import process_file
     from src.utils.chunker import Chunker
     from src.utils.utils import AVAILABLE_MODELS
     from src.services.vector_db import VectorStore
     from src.services.rag import RAGSystem
+    from src.services.translator import TextTranslator
 except ImportError:
-    st.error("Failed to import necessary modules. Make sure your project structure (src/utils, src/services) is correct and accessible.")
-    # Attempt relative imports as a fallback (might work if run differently)
+    st.error("Cannot import from src/, trying fallback...")
     try:
         from utils.file_processor import process_file
         from utils.chunker import Chunker
         from utils.utils import AVAILABLE_MODELS
         from services.vector_db import VectorStore
         from services.rag import RAGSystem
-    except ImportError:
-         st.stop() # Stop execution if imports fail
+        from services.translator import TextTranslator
+    except ImportError as e:
+        st.error(f"Missing required modules: {e}")
+        st.stop()
 
-# --- Configuration ---
-MODELS_DIR = Path("./models")
-MODELS_DIR.mkdir(parents=True, exist_ok=True) # Ensure models directory exists
+# Ensure models directory exists
+MODELS_DIR = Path("models")
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-def download_model(model_name: str, url: str, dest_path: Path):
-    """Downloads a model file with progress indication."""
-    st.info(f"Downloading {model_name}...")
-    st.write(f"Source: {url}")
-    st.write(f"Destination: {dest_path}")
-
+def download_model(name: str, url: str, dest: Path) -> bool:
+    """Download a model file with a progress bar."""
+    st.info(f"Downloading model '{name}'...")
+    progress_bar = st.progress(0.0)
+    status = st.empty()
+    
     try:
-        response = requests.get(url, stream=True)
-        response.raise_for_status()  # Raise an exception for bad status codes
+        with requests.get(url, stream=True) as response:
+            response.raise_for_status()
+            total_size = int(response.headers.get("content-length", 0))
+            downloaded = 0
+            chunk_size = 1024 * 1024  # 1 MB
 
-        # Get total size from headers, default to 0 if not found
-        total_size = int(response.headers.get('content-length', 0))
-        block_size = 1024 * 1024 # Process in 1MB chunks
-        downloaded_size = 0
+            status.text(f"Size: {total_size/(1024*1024):.2f} MB" if total_size else "Size: unknown")
+            
+            with open(dest, "wb") as f:
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        progress = downloaded / total_size if total_size else 0.0
+                        progress_bar.progress(min(progress, 1.0))
+                        status.text(
+                            f"{downloaded/(1024*1024):.2f}/{total_size/(1024*1024):.2f} MB"
+                            if total_size else f"{downloaded/(1024*1024):.2f} MB"
+                        )
 
-        # --- Progress Display Elements ---
-        # 1. Create a progress bar element
-        progress_bar = st.progress(0.0)
-        # 2. Create a text element placeholder using st.empty()
-        status_text = st.empty()
-        # ---------------------------------
+            progress_bar.progress(1.0)
+            status.success("Download complete")
+            return True
 
-        # Set initial status text
-        if total_size > 0:
-             status_text.text(f"Starting download... (Total size: {total_size / (1024*1024):.2f} MB)")
-        else:
-             status_text.text("Starting download... (Total size unknown)")
-
-
-        with open(dest_path, 'wb') as f:
-            # Iterate over the download stream chunk by chunk
-            for chunk in response.iter_content(chunk_size=block_size):
-                if chunk: # filter out keep-alive new chunks
-                    f.write(chunk)
-                    downloaded_size += len(chunk)
-
-                    # Calculate progress percentage
-                    if total_size > 0:
-                        # Ensure progress doesn't exceed 1.0 due to potential inaccuracies
-                        progress = min(float(downloaded_size) / total_size, 1.0)
-                    else:
-                        # If size is unknown, we can't show accurate percentage.
-                        # Keep the bar at 0 or indicate uncertainty.
-                        progress = 0.0
-
-                    # --- Update Progress Display ---
-                    # 1. Update the progress bar value
-                    progress_bar.progress(progress)
-                    # 2. Update the text placeholder with current download size vs total
-                    if total_size > 0:
-                         status_text.text(f"Downloaded {downloaded_size / (1024*1024):.2f} MB / {total_size / (1024*1024):.2f} MB")
-                    else:
-                         status_text.text(f"Downloaded {downloaded_size / (1024*1024):.2f} MB / Unknown MB")
-                    # -----------------------------
-
-        # --- Final Update on Success ---
-        progress_bar.progress(1.0) # Ensure bar visually completes
-        status_text.success(f"✅ Model '{model_name}' downloaded successfully!")
-        # -------------------------------
-        return True
-
-    except requests.exceptions.RequestException as e:
-        st.error(f"Download failed: {e}")
-        # Clear progress elements on failure if they exist
-        if 'progress_bar' in locals(): progress_bar.empty()
-        if 'status_text' in locals(): status_text.empty()
-        if dest_path.exists():
-            dest_path.unlink() # Remove partial file on error
-        return False
-    except IOError as e:
-        st.error(f"Failed to write model file: {e}")
-        if 'progress_bar' in locals(): progress_bar.empty()
-        if 'status_text' in locals(): status_text.empty()
-        if dest_path.exists():
-            dest_path.unlink()
-        return False
     except Exception as e:
-        st.error(f"An unexpected error occurred during download: {e}")
-        if 'progress_bar' in locals(): progress_bar.empty()
-        if 'status_text' in locals(): status_text.empty()
-        if dest_path.exists():
-            dest_path.unlink()
+        st.error(f"Download failed: {e}")
+        progress_bar.empty()
+        status.empty()
+        if dest.exists():
+            dest.unlink()
         return False
 
-def process_documents(uploaded_files, llm_model_path: str) -> RAGSystem | None:
-    """
-    Processes uploaded documents, chunks them, adds to vector store,
-    and initializes the RAG system. Returns RAG system or None on failure.
-    """
-    if not llm_model_path or not Path(llm_model_path).is_file():
-        st.error(f"Invalid LLM model path provided: {llm_model_path}")
+def process_documents(
+    uploaded_files: List[UploadedFile],
+    llm,
+    model_path: str
+):
+    """Process documents through extraction, translation, chunking, and indexing."""
+    # Configure logging
+    debug_mode = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
+    logging.basicConfig(
+        level=logging.DEBUG if debug_mode else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    logger = logging.getLogger(__name__)
+
+    # Validate inputs
+    if not model_path or not Path(model_path).is_file():
+        st.error(f"Invalid LLM path: {model_path}")
         return None
     if not uploaded_files:
-        st.warning("No files uploaded to process.")
+        st.warning("No files uploaded.")
         return None
 
-    st.info("Initializing services...")
+    # Initialize services
     try:
-        vector_db = VectorStore() # Consider adding error handling here if init can fail
-        chunker = Chunker()       # Consider adding error handling here if init can fail
-        rag = RAGSystem(vector_db, llm_model_path) # Pass the actual path
+        vector_db = VectorStore()
+        chunker = Chunker()
+        translator = TextTranslator(llm=llm, debug=debug_mode)
+        rag = RAGSystem(vector_store=vector_db, llm=llm)
     except Exception as e:
-        st.error(f"Failed to initialize RAG components: {e}")
+        logger.exception("Service initialization error")
+        st.error(f"Failed to initialize services: {e}")
         return None
 
-    st.info("Starting document processing...")
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    num_files = len(uploaded_files)
-    processed_files = 0
-    successful_files = 0
-    files_with_errors = []
+    total_files = len(uploaded_files)
+    progress_bar = st.progress(0.0)
+    status_display = st.empty()
+    processed_files = []
+    failed_files = []
 
-    for file in uploaded_files:
-        file_name = file.name
-        status_text.text(f"Processing file: {file_name}...")
-        processed_files += 1
-        progress_percent = int((processed_files / num_files) * 100)
+    for idx, uploaded_file in enumerate(uploaded_files, start=1):
+        file_name = uploaded_file.name
+        status_display.text(f"Processing [{idx}/{total_files}]: {file_name}")
+        progress_bar.progress(idx/total_files)
+
+        file_ext = Path(file_name).suffix.lower()
+        if file_ext not in {".docx", ".pdf", ".csv", ".xlsx", ".xls", ".xlsm"}:
+            st.warning(f"Skipped unsupported file: {file_name}")
+            continue
 
         try:
-            suffix = Path(file_name).suffix.lower()
-            supported_types = {'.docx', '.pdf', '.csv', '.xlsx', '.xls', '.xlsm'}
+            # Use context manager for temp file handling
+            with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as tmp_file:
+                tmp_file.write(uploaded_file.getbuffer())
+                tmp_path = tmp_file.name
 
-            if suffix not in supported_types:
-                st.warning(f"Skipping unsupported file type: {file_name} ({suffix})")
-                progress_bar.progress(progress_percent) # Update progress even if skipped
+            # Process file contents
+            pages = process_file(tmp_path)
+            if not pages:
+                st.warning(f"No content extracted from {file_name}")
                 continue
 
-            # Save the uploaded file to a temporary file safely
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                try:
-                    tmp.write(file.read())
-                    tmp_path = tmp.name
-                except IOError as e:
-                    st.error(f"Error writing temporary file for {file_name}: {e}")
-                    files_with_errors.append(file_name)
-                    progress_bar.progress(progress_percent)
-                    continue # Skip to next file
+            processed_docs = translator.process_documents(pages)
+            if not processed_docs:
+                st.warning(f"No processed documents from {file_name}")
+                continue
 
-            # Process and chunk the document (ensure tmp_path is valid)
-            try:
-                pages = process_file(tmp_path) # Assuming process_file handles its own errors/returns []
-                if not pages:
-                    st.warning(f"No content extracted from {file_name}.")
-                    # Optionally add to errors list or just continue
-                else:
-                    chunks = chunker.chunk_document(file_name, pages)
-                    st.info(f"Created {len(chunks)} chunks for {file_name}.")
-                    if chunks:
-                        vector_db.add_chunks(chunks) # Assuming add_chunks handles potential errors
-                    else:
-                         st.warning(f"No chunks generated for {file_name}, possibly empty or unprocessable.")
-                successful_files += 1
-            except Exception as e:
-                st.error(f"Error processing content of {file_name}: {e}")
-                files_with_errors.append(file_name)
-            finally:
-                # Clean up the temporary file
-                try:
-                    os.unlink(tmp_path)
-                except OSError as e:
-                    st.warning(f"Could not delete temporary file {tmp_path}: {e}")
+            chunks = chunker.chunk_document(file_name, processed_docs)
+            if chunks:
+                vector_db.add_chunks(chunks)
+                processed_files.append(file_name)
+            else:
+                st.warning(f"No chunks generated from {file_name}")
 
         except Exception as e:
-            # Catch broader errors during file handling
-            st.error(f"Unexpected error handling file {file_name}: {e}")
-            files_with_errors.append(file_name)
+            logger.exception(f"Error processing {file_name}")
+            failed_files.append(file_name)
         finally:
-             # Update progress bar regardless of success/failure for this file
-            progress_bar.progress(progress_percent)
+            try:
+                os.unlink(tmp_path)
+            except OSError as e:
+                logger.warning(f"Error deleting temp file: {e}")
 
-    # Final status update
-    status_text.empty() # Clear the individual file status
-    progress_bar.progress(100) # Ensure it reaches 100%
+    # Update final status
+    progress_bar.progress(1.0)
+    status_display.empty()
 
-    if successful_files > 0:
-        st.success(f"Successfully processed {successful_files} out of {num_files} documents.")
-    if files_with_errors:
-        st.error(f"Failed to process {len(files_with_errors)} documents: {', '.join(files_with_errors)}")
-        return None # Indicate partial failure maybe? Or return rag anyway? Depends on desired behavior.
-    if successful_files == 0 and not files_with_errors:
-         st.warning("No documents were successfully processed (perhaps none were supported or content extraction failed).")
-         return None
+    if processed_files:
+        st.success(f"Successfully processed: {', '.join(processed_files)}")
+    if failed_files:
+        st.error(f"Failed to process: {', '.join(failed_files)}")
+        return None
 
-    st.balloons() # Fun indicator of completion
+    st.balloons()
     return rag
 
-# --- Main Application ---
-
 def main():
-    st.set_page_config(page_title="Dr. X Research Assistant", layout="wide")
+    st.set_page_config(
+        page_title="Dr. X Research Assistant",
+        layout="wide",
+        page_icon="🔬"
+    )
     st.title("🔬 Dr. X Research Assistant")
-    st.markdown("Upload research papers, data files, or other documents, select an LLM, and ask questions about the content.")
 
-    # --- Sidebar for Configuration ---
+    # Sidebar configuration
     with st.sidebar:
-        st.header("⚙️ Configuration")
-        st.markdown("---")
+        st.header("Configuration")
+        
+        # Model selection
+        model_choice = st.selectbox(
+            "1. Select Language Model",
+            options=list(AVAILABLE_MODELS.keys()))
+        model_info = AVAILABLE_MODELS[model_choice]
+        model_path = MODELS_DIR / model_info["filename"]
 
-        # 1. Model Selection and Download
-        st.subheader("1. Select LLM Model")
-        selected_model_name = st.selectbox(
-            "Choose a model:",
-            options=list(AVAILABLE_MODELS.keys()),
-            help="Select the Large Language Model to use for analysis."
-        )
-
-        model_info = AVAILABLE_MODELS[selected_model_name]
-        model_filename = model_info["filename"]
-        model_url = model_info["url"]
-        model_path = MODELS_DIR / model_filename
-
-        # Check if model exists locally
-        model_available_locally = model_path.is_file()
-
-        if model_available_locally:
-            st.success(f"✅ Model '{selected_model_name}' is available locally.")
-            st.session_state.selected_model_path = str(model_path) # Store the confirmed path
+        # Model download handling
+        if model_path.exists():
+            st.success(f"Model available: {model_choice}")
+            st.session_state.model_path = str(model_path)
         else:
-            st.warning(f"Model '{selected_model_name}' not found locally.")
-            st.markdown(f"**Required file:** `{model_filename}` in `{MODELS_DIR}`")
-            if st.button(f"Download {selected_model_name} ({model_path.name})"):
-                with st.spinner(f"Downloading {model_filename}... This may take a while."):
-                    download_success = download_model(selected_model_name, model_url, model_path)
-                    if download_success:
-                        st.session_state.selected_model_path = str(model_path)
-                        st.rerun() # Rerun to update UI reflecting downloaded model
-                    else:
-                         # Error handled in download_model, clear session state if needed
-                         if 'selected_model_path' in st.session_state:
-                             del st.session_state.selected_model_path
+            st.warning("Selected model not found")
+            if st.button(f"Download {model_choice}"):
+                if download_model(model_choice, model_info["url"], model_path):
+                    st.session_state.model_path = str(model_path)
+                    st.rerun()
 
+        # Document upload
         st.markdown("---")
-
-        # 2. Document Upload
-        st.subheader("2. Upload Documents")
-        uploaded_files = st.file_uploader(
-            "Select one or more documents:",
+        uploaded_docs = st.file_uploader(
+            "2. Upload Research Documents",
             type=["docx", "pdf", "csv", "xlsx", "xls", "xlsm"],
-            accept_multiple_files=True,
-            help="Upload documents (Word, PDF, Excel, CSV) for the RAG system."
+            accept_multiple_files=True
         )
 
+        # Processing control
         st.markdown("---")
+        process_disabled = not ("model_path" in st.session_state and uploaded_docs)
+        help_text = "Requires model download and document upload" if process_disabled else ""
+        
+        if st.button(
+            "3. Process Documents",
+            disabled=process_disabled,
+            help=help_text
+        ):
+            try:
+                from llama_cpp import Llama
+                llm = Llama(
+                    model_path=st.session_state.model_path,
+                    n_ctx=4096,
+                    n_threads=os.cpu_count() or 4
+                )
+                rag_system = process_documents(
+                    uploaded_docs,
+                    llm,
+                    st.session_state.model_path
+                )
+                
+                if rag_system:
+                    st.session_state.rag = rag_system
+                    st.success("✅ System ready for queries")
+                else:
+                    st.error("❌ Document processing failed")
+                    
+            except Exception as e:
+                st.error(f"Initialization error: {e}")
 
-        # 3. Processing Trigger
-        st.subheader("3. Process Data")
-        # Disable button if no model is confirmed available or no files uploaded
-        process_button_disabled = 'selected_model_path' not in st.session_state or not uploaded_files
-        button_tooltip = ""
-        if 'selected_model_path' not in st.session_state:
-            button_tooltip += "Select and ensure model is available locally. "
-        if not uploaded_files:
-             button_tooltip += "Upload at least one document."
-
-        if st.button("Process Uploaded Documents", disabled=process_button_disabled, help=button_tooltip or None):
-            if 'selected_model_path' in st.session_state and uploaded_files:
-                model_to_use = st.session_state.selected_model_path
-                with st.spinner("⚙️ Processing documents... Indexing content..."):
-                    rag_system = process_documents(uploaded_files, model_to_use)
-                    if rag_system:
-                        st.session_state.rag = rag_system # Store the initialized RAG system
-                        st.success("✅ Processing complete! Ready for Q&A.")
-                    else:
-                        st.error("❌ Document processing failed. Please check errors above.")
-                        # Clear potentially partially initialized rag state
-                        if 'rag' in st.session_state:
-                            del st.session_state.rag
-            else:
-                 # This case should be prevented by the disabled button, but good practice
-                 st.warning("Please ensure a model is selected/downloaded and documents are uploaded.")
-
-
-    # --- Main Area for Q&A ---
-    st.markdown("---") # Divider
-
-    if "rag" in st.session_state and st.session_state.rag is not None:
-        st.header("❓ Ask Questions")
-        st.info("The RAG system is ready. Ask questions based on the content of your uploaded documents.")
-
-        question = st.text_input("Enter your question:", key="qa_input")
-
-        if st.button("Get Answer", key="get_answer_button"):
-            if question:
-                with st.spinner("🧠 Thinking..."):
-                    try:
-                        answer = st.session_state.rag.generate_answer(question)
-                        st.markdown("#### Answer:")
-                        st.markdown(answer) # Use markdown for potential formatting in the answer
-                    except Exception as e:
-                        st.error(f"Error generating answer: {e}")
-                        st.exception(e) # Show detailed traceback for debugging if needed
-            else:
-                st.warning("Please enter a question.")
+    # Main interaction area
+    st.markdown("---")
+    if "rag" in st.session_state:
+        st.header("Research Query Interface")
+        user_query = st.text_input("Enter your research question:")
+        
+        if st.button("Get Answer") and user_query:
+            try:
+                with st.spinner("Analyzing documents..."):
+                    answer = st.session_state.rag.generate_answer(user_query)
+                st.markdown("**Research Answer:**")
+                st.write(answer)
+            except Exception as e:
+                st.error(f"Query failed: {e}")
     else:
-         st.info("Upload documents and click 'Process Uploaded Documents' in the sidebar to enable the Q&A section.")
-
+        st.info("Please configure and process documents to enable queries.")
 
 if __name__ == "__main__":
-    # Basic check for dependencies mentioned in the original code
-    # You might want more robust checks depending on your environment
-    try:
-        import llama_cpp
-        import sentence_transformers
-        # Add other crucial imports your RAG system depends on
-    except ImportError as e:
-         st.error(f"Missing essential library: {e.name}. Please install it (e.g., `pip install {e.name}`). Your RAG system might not work.")
-         # Consider stopping execution if llama_cpp or sentence-transformers are absolutely essential upfront
-         # st.stop()
-
     main()

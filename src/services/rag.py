@@ -1,5 +1,4 @@
-from llama_cpp import Llama
-from src.core.core import DocumentChunk, track_performance, logger
+from src.core.core import track_performance, logger
 from typing import Any, List
 import os
 
@@ -8,7 +7,7 @@ class RAGSystem:
     Retrieval-Augmented Generation (RAG) system that retrieves document chunks from a
     vector store and generates answers using a Llama-based language model.
     """
-    def __init__(self, vector_store: Any, model_path: str):
+    def __init__(self, vector_store: Any, llm):
         """
         Initializes the RAG system with the given vector store and Llama model.
 
@@ -16,15 +15,9 @@ class RAGSystem:
             vector_store: An instance of a vector store that has a query method.
             model_path (str): The file path to the Llama model.
         """
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Llama model not found at {model_path}. Download a GGUF model first!")
         
         self.vector_store = vector_store
-        self.llm = Llama(
-            model_path=model_path,
-            n_ctx=4096,
-            n_threads=4
-        )
+        self.llm = llm
         self.history: List[str] = []
     
     @track_performance
