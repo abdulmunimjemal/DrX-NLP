@@ -1,5 +1,20 @@
 # NLP Project - Dr. X's Research Assistant
 
+## Contents
+
+- [1. Introduction](#1-introduction)
+- [2. Project Objective](#2-project-objective)
+- [Screenshots](#screenshots)
+- [3. Methodology & Workflow](#3-methodology--workflow)
+- [4. Technology Stack](#4-technology-stack)
+- [5. Project Structure](#5-project-structure)
+- [6. Setup and Installation](#6-setup-and-installation)
+- [7. Usage](#7-usage)
+- [8. Performance Metrics](#8-performance-metrics)
+- [9. Key Features & Creativity](#9-key-features--creativity)
+- [10. LLM and Embedding Model Information](#10-llm-and-embedding-model-information)
+
+
 ## 1. Introduction
 
 This project addresses the local NLP challenge, focusing on processing the scattered research publications of the vanished Dr. X. The goal is to create an NLP system capable of extracting information from various document formats, making sense of the research through analysis, summarization, and translation, and enabling interactive querying via a Retrieval-Augmented Generation (RAG) system. The project aims to uncover insights into Dr. X's work and potentially shed light on their disappearance using only text-based NLP techniques and local models.
@@ -15,6 +30,21 @@ The primary objective is to build a robust pipeline that can:
 5.  **Summarize:** Implement a hierarchical summarization process capable of handling large documents by iteratively chunking and summarizing to produce a final coherent summary within specified length constraints.
 6.  **Translate:** Detect the language of the documents and translate non-English/non-Arabic content into English, preprocessing for accuracy and leveraging an LLM for fluency improvements.
 7.  **Measure Performance:** Track processing efficiency, specifically "tokens per second," during key NLP tasks (embedding, RAG, translation, summarization).
+
+### Screenshots
+
+**Home Page:**
+![image](https://github.com/user-attachments/assets/c0e3da97-ab3d-4742-bd29-9eaec781add1)
+
+**RAG Q&A:**
+![image](https://github.com/user-attachments/assets/917f844c-5dc9-4929-ab1c-c5d99ec450cc)
+
+**Summarization:**
+![image](https://github.com/user-attachments/assets/04a7403b-f8ae-48b3-b21f-47eb51340caf)
+
+**ROUGE Evaluation:**
+![image](https://github.com/user-attachments/assets/cd11bd3f-b599-4612-9a3e-431af6ebf60f)
+
 
 ## 3. Methodology & Workflow
 
